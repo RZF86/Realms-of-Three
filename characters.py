@@ -12,9 +12,19 @@ class Character:
         self.max_health = health
         self.speed = speed
         self.strength = strength
+        self.base_strength = strength  # Store base for leveling
         self.x = 0
         self.y = 0
         self.is_attacking = False
+        
+        # Level system
+        self.level = 1
+        self.experience = 0
+        self.exp_to_level = 100
+        
+        # Stats for leveling
+        self.attack_damage_mult = 1.0
+        self.health_mult = 1.0
         
     def take_damage(self, damage):
         """Reduce health by damage amount"""
@@ -24,6 +34,25 @@ class Character:
     def heal(self, amount):
         """Increase health"""
         self.health = min(self.max_health, self.health + amount)
+    
+    def gain_experience(self, amount):
+        """Gain experience and level up if needed"""
+        self.experience += amount
+        if self.experience >= self.exp_to_level:
+            self.level_up()
+    
+    def level_up(self):
+        """Level up the character"""
+        self.level += 1
+        self.experience = 0
+        self.exp_to_level = int(100 * (self.level ** 1.2))
+        
+        # Increase stats
+        self.attack_damage_mult += 0.15
+        self.health_mult += 0.1
+        self.max_health = int(self.max_health * 1.1)
+        self.health = self.max_health
+        self.strength = int(self.base_strength * self.attack_damage_mult)
         
     def is_alive(self):
         """Check if character is still alive"""
@@ -44,11 +73,14 @@ class Human(Character):
     def __init__(self):
         super().__init__(name="Human", health=100, speed=5, strength=8)
         self.ability_cooldown = 0
+        self.character_type = "human"
+        self.base_strength = 8
         
     def attack(self):
         """Sword strike attack"""
+        damage = self.strength * 1.2 * self.attack_damage_mult
         return {
-            'damage': self.strength * 1.2,
+            'damage': damage,
             'type': 'melee',
             'range': 50,
             'description': 'Tactical sword strike'
@@ -58,8 +90,9 @@ class Human(Character):
         """Shield bash - stuns enemies"""
         if self.ability_cooldown <= 0:
             self.ability_cooldown = 30
+            damage = self.strength * 0.8 * self.attack_damage_mult
             return {
-                'damage': self.strength * 0.8,
+                'damage': damage,
                 'type': 'stun',
                 'duration': 2,
                 'description': 'Shield bash - stuns for 2 seconds'
@@ -74,11 +107,14 @@ class Frog(Character):
         super().__init__(name="Frog", health=70, speed=10, strength=4)
         self.ability_cooldown = 0
         self.jump_height = 100
+        self.character_type = "frog"
+        self.base_strength = 4
         
     def attack(self):
         """Tongue lash attack"""
+        damage = self.strength * 1.0 * self.attack_damage_mult
         return {
-            'damage': self.strength * 1.0,
+            'damage': damage,
             'type': 'melee',
             'range': 40,
             'description': 'Quick tongue lash'
@@ -88,8 +124,9 @@ class Frog(Character):
         """Jump attack - high agility move"""
         if self.ability_cooldown <= 0:
             self.ability_cooldown = 20
+            damage = self.strength * 1.5 * self.attack_damage_mult
             return {
-                'damage': self.strength * 1.5,
+                'damage': damage,
                 'type': 'jump_attack',
                 'height': self.jump_height,
                 'description': 'Leap attack - dodge and strike'
@@ -103,11 +140,14 @@ class Dragon(Character):
     def __init__(self):
         super().__init__(name="Dragon", health=150, speed=3, strength=12)
         self.ability_cooldown = 0
+        self.character_type = "dragon"
+        self.base_strength = 12
         
     def attack(self):
         """Melee claw attack"""
+        damage = self.strength * 1.3 * self.attack_damage_mult
         return {
-            'damage': self.strength * 1.3,
+            'damage': damage,
             'type': 'melee',
             'range': 60,
             'description': 'Powerful claw strike'
@@ -117,8 +157,9 @@ class Dragon(Character):
         """Fire breath - area of effect attack"""
         if self.ability_cooldown <= 0:
             self.ability_cooldown = 40
+            damage = self.strength * 1.8 * self.attack_damage_mult
             return {
-                'damage': self.strength * 1.8,
+                'damage': damage,
                 'type': 'aoe',
                 'radius': 120,
                 'description': 'Fire breath - massive AoE damage'
