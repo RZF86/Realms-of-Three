@@ -1,10 +1,12 @@
 """
-Main game logic and state management with areas and level progression
+Main game logic with equipment, bosses, and item drops
 """
 
 import pygame
 import random
 from characters import create_character
+from equipment import Equipment
+from enemies import EnemySpawner, BossArena, ItemDrop, MiniBoss, Boss
 
 
 class Area:
@@ -30,10 +32,15 @@ class Game:
         self.fps = 60
         
         # Game states
-        self.state = "CHARACTER_SELECT"  # CHARACTER_SELECT, AREA_SELECT, GAME, PAUSED, GAME_OVER
+        self.state = "CHARACTER_SELECT"
         self.player = None
         self.current_area = None
+        self.equipment = None
         self.enemies = []
+        self.mini_boss = None
+        self.boss = None
+        self.boss_arena = None
+        self.item_drops = []
         self.running = True
         
         # Define areas
@@ -59,6 +66,8 @@ class Game:
         }
         
         self.keys_pressed = set()
+        self.notification = ""
+        self.notification_timer = 0
         
     def handle_events(self):
         """Handle pygame events"""
@@ -104,20 +113,33 @@ class Game:
                 self.perform_special_ability()
         elif event.key == pygame.K_q:
             self.state = "AREA_SELECT"
+        elif event.key == pygame.K_u:
+            # Upgrade weapon
+            success, msg = self.equipment.upgrade_weapon()
+            self.show_notification(msg)
+        elif event.key == pygame.K_i:
+            # Upgrade armor
+            success, msg = self.equipment.upgrade_armor()
+            self.show_notification(msg)
+    
+    def show_notification(self, text):
+        """Show a notification on screen"""
+        self.notification = text
+        self.notification_timer = 120  # 2 seconds at 60 FPS
     
     def select_character(self, character_type):
         """Select a character and show area selection"""
         try:
             self.player = create_character(character_type)
+            self.equipment = Equipment()
+            self.equipment.initialize_equipment(character_type)
             self.state = "AREA_SELECT"
-            print(f"Selected: {self.player.name}")
         except ValueError as e:
             print(f"Error: {e}")
     
     def start_game(self):
         """Start the game with selected character"""
         if self.player:
-            # Get character's starting area
             area_info = self.areas[self.player.character_type]
             self.current_area = Area(
                 area_info['name'],
@@ -126,16 +148,20 @@ class Game:
                 area_info['description']
             )
             
-            # Spawn player in starting position based on character
+            # Spawn player
             if self.player.character_type == 'human':
                 self.player.x = 600
                 self.player.y = 400
             elif self.player.character_type == 'frog':
                 self.player.x = 300
                 self.player.y = 600
-            else:  # dragon
+            else:
                 self.player.x = 900
                 self.player.y = 200
+            
+            # Apply equipment bonuses
+            self.player.max_health += self.equipment.current_armor.health_bonus
+            self.player.health = self.player.max_health
             
             self.state = "GAME"
             self.spawn_enemies()
@@ -143,6 +169,32 @@ class Game:
     def spawn_enemies(self):
         """Spawn enemies based on area difficulty"""
         self.enemies = []
+        self.mini_boss = None
+        self.boss = None
+        
+        # Check for boss spawn
+        if EnemySpawner.should_spawn_boss(self.current_area.difficulty):
+            self.boss = EnemySpawner.spawn_boss(
+                self.player.character_type,
+                self.current_area.difficulty,
+                self.width // 2,
+                100
+            )
+            self.boss_arena = BossArena(self.boss, self.width, self.height)
+            self.show_notification(f"⚔️ BOSS APPEARED: {self.boss.name}! ⚔️")
+            return
+        
+        # Check for mini-boss spawn
+        if EnemySpawner.should_spawn_mini_boss(self.current_area.difficulty):
+            self.mini_boss = EnemySpawner.spawn_mini_boss(
+                self.player.character_type,
+                self.current_area.difficulty,
+                random.randint(200, self.width - 200),
+                100
+            )
+            self.show_notification(f"⚠️ MINI-BOSS: {self.mini_boss.name}! ⚠️")
+        
+        # Spawn regular enemies
         num_enemies = 3 + (self.current_area.difficulty - 1)
         for _ in range(num_enemies):
             enemy = {
@@ -161,8 +213,9 @@ class Game:
         """Perform player attack on nearby enemies"""
         attack_data = self.player.attack()
         attack_range = attack_data['range']
-        damage = attack_data['damage']
+        damage = attack_data['damage'] * self.equipment.current_weapon.attack_speed
         
+        # Attack regular enemies
         for enemy in self.enemies:
             dx = enemy['x'] - self.player.x
             dy = enemy['y'] - self.player.y
@@ -172,39 +225,124 @@ class Game:
                 enemy['health'] -= damage
                 if enemy['health'] <= 0:
                     self.player.gain_experience(50 * self.current_area.difficulty)
+                    self.equipment.add_gold(10 * self.current_area.difficulty)
+        
+        # Attack mini-boss
+        if self.mini_boss:
+            dx = self.mini_boss.x - self.player.x
+            dy = self.mini_boss.y - self.player.y
+            distance = (dx**2 + dy**2)**0.5
+            
+            if distance < attack_range:
+                self.mini_boss.health -= damage
+                if self.mini_boss.health <= 0:
+                    self.on_mini_boss_defeated()
+        
+        # Attack boss
+        if self.boss:
+            dx = self.boss.x - self.player.x
+            dy = self.boss.y - self.player.y
+            distance = (dx**2 + dy**2)**0.5
+            
+            if distance < attack_range and not self.boss.invulnerable:
+                self.boss.health -= damage
+                if self.boss.health <= 0:
+                    self.on_boss_defeated()
     
     def perform_special_ability(self):
         """Perform player's special ability"""
         ability_data = self.player.special_ability()
         if ability_data:
-            damage = ability_data['damage']
+            damage = ability_data['damage'] * self.equipment.current_weapon.attack_speed
             ability_range = ability_data.get('range', 100)
             
-            if ability_data['type'] == 'stun':
-                for enemy in self.enemies:
-                    dx = enemy['x'] - self.player.x
-                    dy = enemy['y'] - self.player.y
-                    distance = (dx**2 + dy**2)**0.5
-                    
-                    if distance < ability_range:
-                        enemy['health'] -= damage
+            # Hit regular enemies
+            for enemy in self.enemies:
+                dx = enemy['x'] - self.player.x
+                dy = enemy['y'] - self.player.y
+                distance = (dx**2 + dy**2)**0.5
+                
+                if distance < ability_range:
+                    enemy['health'] -= damage
+                    if ability_data['type'] == 'stun':
                         enemy['stun_duration'] = ability_data['duration'] * 60
+                    if enemy['health'] <= 0:
+                        self.player.gain_experience(75 * self.current_area.difficulty)
+                        self.equipment.add_gold(15 * self.current_area.difficulty)
             
-            elif ability_data['type'] == 'aoe':
-                radius = ability_data['radius']
-                for enemy in self.enemies:
-                    dx = enemy['x'] - self.player.x
-                    dy = enemy['y'] - self.player.y
-                    distance = (dx**2 + dy**2)**0.5
-                    
-                    if distance < radius:
-                        enemy['health'] -= damage
-                        if enemy['health'] <= 0:
-                            self.player.gain_experience(75 * self.current_area.difficulty)
+            # Hit mini-boss
+            if self.mini_boss:
+                dx = self.mini_boss.x - self.player.x
+                dy = self.mini_boss.y - self.player.y
+                distance = (dx**2 + dy**2)**0.5
+                
+                if distance < ability_range:
+                    self.mini_boss.health -= damage
+                    if ability_data['type'] == 'stun':
+                        self.mini_boss.stun_duration = ability_data['duration'] * 60
+                    if self.mini_boss.health <= 0:
+                        self.on_mini_boss_defeated()
+            
+            # Hit boss
+            if self.boss and not self.boss.invulnerable:
+                dx = self.boss.x - self.player.x
+                dy = self.boss.y - self.player.y
+                distance = (dx**2 + dy**2)**0.5
+                
+                if distance < ability_range:
+                    self.boss.health -= damage
+                    if self.boss.health <= 0:
+                        self.on_boss_defeated()
+    
+    def on_mini_boss_defeated(self):
+        """Handle mini-boss defeat"""
+        self.player.gain_experience(500)
+        self.equipment.add_gold(self.mini_boss.gold_drop)
+        
+        # Drop legendary items
+        if random.random() < 0.5:
+            weapon = self.equipment.get_legendary_weapon(self.player.character_type)
+            if weapon:
+                drop = ItemDrop(weapon, self.mini_boss.x, self.mini_boss.y, "legendary")
+                self.item_drops.append(drop)
+                self.show_notification(f"⭐ Legendary Weapon: {weapon.name}!")
+        else:
+            armor = self.equipment.get_legendary_armor(self.player.character_type)
+            if armor:
+                drop = ItemDrop(armor, self.mini_boss.x, self.mini_boss.y, "legendary")
+                self.item_drops.append(drop)
+                self.show_notification(f"⭐ Legendary Armor: {armor.name}!")
+        
+        self.mini_boss = None
+    
+    def on_boss_defeated(self):
+        """Handle boss defeat"""
+        self.player.gain_experience(2000)
+        self.equipment.add_gold(self.boss.gold_drop)
+        
+        # Drop mythical items
+        if random.random() < 0.5:
+            weapon = self.equipment.get_mythical_weapon(self.player.character_type)
+            if weapon:
+                drop = ItemDrop(weapon, self.boss.x, self.boss.y, "mythical")
+                self.item_drops.append(drop)
+                self.show_notification(f"✨ MYTHICAL WEAPON: {weapon.name}! ✨")
+        else:
+            armor = self.equipment.get_mythical_armor(self.player.character_type)
+            if armor:
+                drop = ItemDrop(armor, self.boss.x, self.boss.y, "mythical")
+                self.item_drops.append(drop)
+                self.show_notification(f"✨ MYTHICAL ARMOR: {armor.name}! ✨")
+        
+        # Advance to next difficulty
+        self.current_area.difficulty += 1
+        self.boss = None
+        self.boss_arena = None
+        self.spawn_enemies()
     
     def update_player_position(self):
         """Update player position based on keys pressed"""
-        speed = self.player.speed * 0.5  # Scale down for gameplay balance
+        speed = self.player.speed * 0.5
         
         if pygame.K_w in self.keys_pressed:
             self.player.y -= speed
@@ -215,7 +353,6 @@ class Game:
         if pygame.K_d in self.keys_pressed:
             self.player.x += speed
         
-        # Keep player in bounds
         self.player.x = max(0, min(self.width, self.player.x))
         self.player.y = max(0, min(self.height - 150, self.player.y))
     
@@ -223,29 +360,72 @@ class Game:
         """Update game logic"""
         if self.state == "GAME":
             if self.player:
-                # Update player position
                 self.update_player_position()
                 
-                # Update ability cooldowns
                 if self.player.ability_cooldown > 0:
                     self.player.ability_cooldown -= 1
                 
-                # Remove dead enemies and check for level completion
-                self.enemies = [e for e in self.enemies if e['health'] > 0]
-                if not self.enemies:
-                    # Gain bonus experience for clearing area
-                    self.player.gain_experience(300)
-                    self.current_area.difficulty += 1
-                    self.spawn_enemies()
+                if self.notification_timer > 0:
+                    self.notification_timer -= 1
                 
-                # Update enemies
+                # Remove dead enemies
+                self.enemies = [e for e in self.enemies if e['health'] > 0]
+                
+                # Update item drops
+                for drop in self.item_drops[:]:
+                    drop.update()
+                    if drop.check_collection(self.player.x, self.player.y):
+                        if isinstance(drop.item, type(self.equipment.current_weapon)):
+                            self.equipment.add_weapon(drop.item)
+                        else:
+                            self.equipment.add_armor(drop.item)
+                        self.item_drops.remove(drop)
+                        self.show_notification(f"Collected: {drop.item.name}!")
+                
+                # Boss updates
+                if self.boss:
+                    self.boss_arena.update()
+                    self.boss.update_invulnerability()
+                    
+                    # Boss AI
+                    if not self.boss.invulnerable:
+                        dx = self.player.x - self.boss.x
+                        dy = self.player.y - self.boss.y
+                        distance = (dx**2 + dy**2)**0.5
+                        
+                        if distance > 20:
+                            self.boss.x += (dx / distance) * self.boss.speed
+                            self.boss.y += (dy / distance) * self.boss.speed
+                        
+                        if distance < (self.boss.radius + 15):
+                            damage = self.boss.damage * 0.016
+                            reduced_damage = self.equipment.current_armor.reduce_damage(damage)
+                            self.player.take_damage(reduced_damage)
+                
+                # Mini-boss updates
+                if self.mini_boss:
+                    if self.mini_boss.stun_duration > 0:
+                        self.mini_boss.stun_duration -= 1
+                    else:
+                        dx = self.player.x - self.mini_boss.x
+                        dy = self.player.y - self.mini_boss.y
+                        distance = (dx**2 + dy**2)**0.5
+                        
+                        if distance > 20:
+                            self.mini_boss.x += (dx / distance) * self.mini_boss.speed
+                            self.mini_boss.y += (dy / distance) * self.mini_boss.speed
+                        
+                        if distance < (self.mini_boss.radius + 15):
+                            damage = self.mini_boss.damage * 0.016
+                            reduced_damage = self.equipment.current_armor.reduce_damage(damage)
+                            self.player.take_damage(reduced_damage)
+                
+                # Regular enemy updates
                 for enemy in self.enemies:
-                    # Reduce stun duration
                     if enemy['stun_duration'] > 0:
                         enemy['stun_duration'] -= 1
                         continue
                     
-                    # Simple enemy AI - move towards player
                     dx = self.player.x - enemy['x']
                     dy = self.player.y - enemy['y']
                     distance = (dx**2 + dy**2)**0.5
@@ -254,13 +434,20 @@ class Game:
                         enemy['x'] += (dx / distance) * 1.5
                         enemy['y'] += (dy / distance) * 1.5
                     
-                    # Check collision with player
                     if distance < (enemy['radius'] + 15):
-                        self.player.take_damage(enemy['damage'] * 0.016)  # Per frame
+                        damage = enemy['damage'] * 0.016
+                        reduced_damage = self.equipment.current_armor.reduce_damage(damage)
+                        self.player.take_damage(reduced_damage)
                 
                 # Check game over
                 if not self.player.is_alive():
                     self.state = "GAME_OVER"
+                
+                # Check level completion
+                if not self.enemies and not self.mini_boss and not self.boss:
+                    self.player.gain_experience(300)
+                    self.current_area.difficulty += 1
+                    self.spawn_enemies()
     
     def draw(self):
         """Draw game elements"""
@@ -285,11 +472,9 @@ class Game:
         font_medium = pygame.font.Font(None, 48)
         font_small = pygame.font.Font(None, 36)
         
-        # Title
         title = font_large.render("SELECT YOUR CHARACTER", True, (255, 255, 255))
         self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 50))
         
-        # Character options
         y_pos = 200
         characters_info = [
             ("1 - HUMAN", "Balanced stats • Medium speed & strength", (100, 255, 100)),
@@ -318,23 +503,19 @@ class Game:
         if self.player:
             area_info = self.areas[self.player.character_type]
             
-            # Title
             title = font_large.render(f"Welcome, {self.player.name}!", True, (255, 200, 100))
             self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 50))
             
-            # Area description
             area_name = font_medium.render(area_info['name'], True, (100, 255, 100))
             self.screen.blit(area_name, (self.width // 2 - area_name.get_width() // 2, 150))
             
             desc = font_small.render(area_info['description'], True, (200, 200, 200))
             self.screen.blit(desc, (self.width // 2 - desc.get_width() // 2, 250))
             
-            # Stats
             stats_text = f"HP: {self.player.max_health} | Speed: {int(self.player.speed)} | Damage: {int(self.player.strength)}"
             stats = font_small.render(stats_text, True, (100, 200, 255))
             self.screen.blit(stats, (self.width // 2 - stats.get_width() // 2, 350))
             
-            # Instructions
             start = font_medium.render("Press ENTER to start", True, (255, 255, 100))
             self.screen.blit(start, (self.width // 2 - start.get_width() // 2, 500))
             
@@ -344,26 +525,58 @@ class Game:
     def draw_game(self):
         """Draw the main game"""
         if self.current_area and self.player:
-            # Draw area background
             self.screen.fill(self.current_area.color)
             
-            # Draw ground/safe zone at bottom
             pygame.draw.rect(self.screen, (50, 150, 50), (0, self.height - 150, self.width, 150))
+            
+            # Draw item drops
+            for drop in self.item_drops:
+                color = drop.get_color()
+                pygame.draw.circle(self.screen, color, (int(drop.x), int(drop.y)), 8)
             
             # Draw enemies
             for enemy in self.enemies:
-                # Change color if stunned
-                color = (100, 100, 200) if enemy['stun_duration'] > 0 else enemy['color']
-                pygame.draw.circle(self.screen, color, 
+                pygame.draw.circle(self.screen, enemy['color'], 
                                  (int(enemy['x']), int(enemy['y'])), enemy['radius'])
                 
-                # Enemy health bar
                 health_ratio = enemy['health'] / enemy['max_health']
                 bar_width = 30
                 pygame.draw.rect(self.screen, (255, 0, 0), 
                                (enemy['x'] - bar_width // 2, enemy['y'] - 30, bar_width, 5))
                 pygame.draw.rect(self.screen, (0, 255, 0), 
                                (enemy['x'] - bar_width // 2, enemy['y'] - 30, bar_width * health_ratio, 5))
+            
+            # Draw mini-boss
+            if self.mini_boss:
+                color = (100, 100, 200) if self.mini_boss.stun_duration > 0 else self.mini_boss.color
+                pygame.draw.circle(self.screen, color, 
+                                 (int(self.mini_boss.x), int(self.mini_boss.y)), self.mini_boss.radius)
+                
+                health_ratio = self.mini_boss.health / self.mini_boss.max_health
+                bar_width = 50
+                pygame.draw.rect(self.screen, (255, 100, 0), 
+                               (self.mini_boss.x - bar_width // 2, self.mini_boss.y - 40, bar_width, 8))
+                pygame.draw.rect(self.screen, (0, 255, 0), 
+                               (self.mini_boss.x - bar_width // 2, self.mini_boss.y - 40, bar_width * health_ratio, 8))
+            
+            # Draw boss
+            if self.boss:
+                color = (200, 200, 200) if self.boss.invulnerable else self.boss.color
+                pygame.draw.circle(self.screen, color, 
+                                 (int(self.boss.x), int(self.boss.y)), self.boss.radius)
+                
+                health_ratio = self.boss.health / self.boss.max_health
+                bar_width = 80
+                pygame.draw.rect(self.screen, (255, 0, 0), 
+                               (self.boss.x - bar_width // 2, self.boss.y - 50, bar_width, 10))
+                pygame.draw.rect(self.screen, (255, 100, 0), 
+                               (self.boss.x - bar_width // 2, self.boss.y - 50, bar_width * health_ratio, 10))
+                
+                # Boss phase indicator
+                phase_text = f"Phase {self.boss.phase}"
+                font_small = pygame.font.Font(None, 24)
+                phase_label = font_small.render(phase_text, True, (255, 0, 255))
+                self.screen.blit(phase_label, (int(self.boss.x - 30), int(self.boss.y + 50)))
             
             # Draw player
             player_color = (100, 150, 255) if self.player.character_type == 'human' else \
@@ -395,6 +608,20 @@ class Game:
             exp_label = font_small.render(exp_text, True, (255, 255, 100))
             self.screen.blit(exp_label, (10, 110))
             
+            # Equipment info
+            weapon_text = self.equipment.current_weapon.get_stats_string()
+            weapon_label = font_small.render(weapon_text, True, self.equipment.current_weapon.get_rarity_color())
+            self.screen.blit(weapon_label, (10, 135))
+            
+            armor_text = self.equipment.current_armor.get_stats_string()
+            armor_label = font_small.render(armor_text, True, self.equipment.current_armor.get_rarity_color())
+            self.screen.blit(armor_label, (10, 160))
+            
+            # Gold
+            gold_text = f"Gold: {self.equipment.gold}"
+            gold_label = font_small.render(gold_text, True, (255, 215, 0))
+            self.screen.blit(gold_label, (10, 185))
+            
             # Area info
             area_text = f"Area: {self.current_area.name} | Difficulty: {self.current_area.difficulty}"
             area_label = font_small.render(area_text, True, (200, 200, 200))
@@ -402,15 +629,19 @@ class Game:
             
             # Controls
             controls = [
-                "W/A/S/D - Move",
-                "SPACE - Attack",
-                "SHIFT - Special Ability",
-                "Q - Change Area",
+                "W/A/S/D - Move | SPACE - Attack",
+                "SHIFT - Special | U - Upgrade Weapon",
+                "I - Upgrade Armor | Q - Change Area",
                 "ESC - Pause"
             ]
             for i, control in enumerate(controls):
                 label = font_small.render(control, True, (150, 150, 150))
-                self.screen.blit(label, (self.width - 250, self.height - 140 + i * 25))
+                self.screen.blit(label, (self.width - 450, self.height - 110 + i * 25))
+            
+            # Notification
+            if self.notification_timer > 0:
+                notification = pygame.font.Font(None, 32).render(self.notification, True, (255, 100, 100))
+                self.screen.blit(notification, (self.width // 2 - notification.get_width() // 2, 400))
     
     def draw_paused(self):
         """Draw pause screen"""
@@ -427,9 +658,6 @@ class Game:
         
         resume = font_small.render("Press ESC to resume", True, (200, 200, 200))
         self.screen.blit(resume, (self.width // 2 - resume.get_width() // 2, self.height // 2 + 20))
-        
-        menu = font_small.render("Press Q to change area", True, (200, 200, 200))
-        self.screen.blit(menu, (self.width // 2 - menu.get_width() // 2, self.height // 2 + 70))
     
     def draw_game_over(self):
         """Draw game over screen"""
@@ -446,14 +674,19 @@ class Game:
         self.screen.blit(game_over_text, (self.width // 2 - game_over_text.get_width() // 2, 
                                          self.height // 2 - 150))
         
-        stats_text = f"Final Level: {self.player.level} | Experience Gained: {self.player.experience}"
+        stats_text = f"Final Level: {self.player.level} | Gold Earned: {self.equipment.gold}"
         stats_label = font_medium.render(stats_text, True, (200, 200, 200))
         self.screen.blit(stats_label, (self.width // 2 - stats_label.get_width() // 2, 
                                       self.height // 2 - 20))
         
+        best_item = "Best Item: " + self.equipment.current_weapon.name
+        item_label = font_small.render(best_item, True, (255, 200, 100))
+        self.screen.blit(item_label, (self.width // 2 - item_label.get_width() // 2, 
+                                     self.height // 2 + 60))
+        
         restart = font_small.render("Press ESC to return to menu", True, (255, 255, 100))
         self.screen.blit(restart, (self.width // 2 - restart.get_width() // 2, 
-                                  self.height // 2 + 80))
+                                  self.height // 2 + 120))
     
     def run(self):
         """Main game loop"""
