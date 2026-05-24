@@ -1,12 +1,13 @@
 """
-Main game logic with equipment, bosses, and item drops
+Main game logic with equipment, bosses, item drops, shops, and autosave
 """
 
 import pygame
 import random
 from characters import create_character
-from equipment import Equipment
+from equipment import Equipment, Weapon, Armor
 from enemies import EnemySpawner, BossArena, ItemDrop, MiniBoss, Boss
+from shops import ShopManager
 
 
 class Area:
@@ -23,7 +24,7 @@ class Area:
 class Game:
     """Main game class"""
     
-    def __init__(self, width=1200, height=800):
+    def __init__(self, save_manager, width=1200, height=800):
         self.width = width
         self.height = height
         self.screen = pygame.display.set_mode((width, height))
@@ -31,8 +32,13 @@ class Game:
         self.clock = pygame.time.Clock()
         self.fps = 60
         
+        # Save manager
+        self.save_manager = save_manager
+        self.autosave_counter = 0
+        self.autosave_interval = 300  # Autosave every 5 seconds
+        
         # Game states
-        self.state = "CHARACTER_SELECT"
+        self.state = "MAIN_MENU"  # MAIN_MENU, CHARACTER_SELECT, AREA_SELECT, SHOP, GAME, PAUSED, GAME_OVER
         self.player = None
         self.current_area = None
         self.equipment = None
@@ -42,6 +48,8 @@ class Game:
         self.boss_arena = None
         self.item_drops = []
         self.running = True
+        self.shop_manager = ShopManager()
+        self.available_shops = []
         
         # Define areas
         self.areas = {
@@ -82,21 +90,41 @@ class Game:
     
     def handle_input(self, event):
         """Handle keyboard input based on game state"""
-        if self.state == "CHARACTER_SELECT":
+        if self.state == "MAIN_MENU":
+            if event.key == pygame.K_1:
+                # Check for autosave
+                if self.save_manager.has_autosave():
+                    self.load_autosave()
+                else:
+                    self.state = "CHARACTER_SELECT"
+            elif event.key == pygame.K_2:
+                self.state = "CHARACTER_SELECT"
+            elif event.key == pygame.K_q:
+                self.running = False
+        
+        elif self.state == "CHARACTER_SELECT":
             if event.key == pygame.K_1:
                 self.select_character("human")
             elif event.key == pygame.K_2:
                 self.select_character("frog")
             elif event.key == pygame.K_3:
                 self.select_character("dragon")
+            elif event.key == pygame.K_ESCAPE:
+                self.state = "MAIN_MENU"
+        
         elif self.state == "AREA_SELECT":
             if event.key == pygame.K_RETURN:
                 self.start_game()
             elif event.key == pygame.K_ESCAPE:
                 self.state = "CHARACTER_SELECT"
                 self.player = None
+        
         elif self.state == "GAME":
             self.handle_game_input(event)
+        
+        elif self.state == "SHOP":
+            self.handle_shop_input(event)
+        
         elif self.state == "PAUSED":
             if event.key == pygame.K_ESCAPE:
                 self.state = "GAME"
@@ -121,6 +149,18 @@ class Game:
             # Upgrade armor
             success, msg = self.equipment.upgrade_armor()
             self.show_notification(msg)
+        elif event.key == pygame.K_s:
+            # Open shop if available
+            self.available_shops = self.shop_manager.get_available_shops(self.player.level)
+            if self.available_shops:
+                self.state = "SHOP"
+                self.show_notification(f"Opened {self.available_shops[0].name}!")
+    
+    def handle_shop_input(self, event):
+        """Handle shop input"""
+        if event.key == pygame.K_ESCAPE:
+            self.state = "GAME"
+            self.shop_manager.current_shop = None
     
     def show_notification(self, text):
         """Show a notification on screen"""
@@ -136,6 +176,75 @@ class Game:
             self.state = "AREA_SELECT"
         except ValueError as e:
             print(f"Error: {e}")
+    
+    def load_autosave(self):
+        """Load the autosave file"""
+        success, save_data, msg = self.save_manager.load_game()
+        
+        if success and save_data:
+            # Load player
+            player_data = save_data['player']
+            self.player = create_character(player_data['character_type'])
+            self.player.level = player_data['level']
+            self.player.experience = player_data['experience']
+            self.player.exp_to_level = player_data['exp_to_level']
+            self.player.health = player_data['health']
+            self.player.max_health = player_data['max_health']
+            self.player.x = player_data['x']
+            self.player.y = player_data['y']
+            self.player.attack_damage_mult = player_data['attack_damage_mult']
+            self.player.health_mult = player_data['health_mult']
+            
+            # Load equipment
+            self.equipment = Equipment()
+            self.equipment.initialize_equipment(player_data['character_type'])
+            self.equipment.gold = save_data['equipment']['gold']
+            
+            # Recreate owned weapons and armor
+            self.equipment.owned_weapons = []
+            for w_data in save_data['equipment']['owned_weapons']:
+                weapon = Weapon(
+                    w_data['name'],
+                    w_data['base_damage'],
+                    w_data['crit_chance'],
+                    w_data['attack_speed'],
+                    w_data['rarity']
+                )
+                weapon.level = w_data['level']
+                weapon.current_damage = w_data['current_damage']
+                self.equipment.owned_weapons.append(weapon)
+            
+            self.equipment.current_weapon = self.equipment.owned_weapons[0]
+            
+            self.equipment.owned_armor = []
+            for a_data in save_data['equipment']['owned_armor']:
+                armor = Armor(
+                    a_data['name'],
+                    a_data['base_defense'],
+                    a_data['health_bonus'],
+                    a_data['rarity']
+                )
+                armor.level = a_data['level']
+                armor.current_defense = a_data['current_defense']
+                self.equipment.owned_armor.append(armor)
+            
+            self.equipment.current_armor = self.equipment.owned_armor[0]
+            
+            # Load area
+            area_data = save_data['area']
+            self.current_area = Area(
+                area_data['name'],
+                self.areas[player_data['character_type']]['color'],
+                area_data['difficulty'],
+                self.areas[player_data['character_type']]['description']
+            )
+            
+            self.state = "GAME"
+            self.spawn_enemies()
+            self.show_notification("✨ Game loaded! Welcome back! ✨")
+        else:
+            self.show_notification("Failed to load save!")
+            self.state = "CHARACTER_SELECT"
     
     def start_game(self):
         """Start the game with selected character"""
@@ -368,6 +477,12 @@ class Game:
                 if self.notification_timer > 0:
                     self.notification_timer -= 1
                 
+                # Autosave
+                self.autosave_counter += 1
+                if self.autosave_counter >= self.autosave_interval:
+                    self.save_manager.save_game(self.player, self.equipment, self.current_area, self.current_area.difficulty)
+                    self.autosave_counter = 0
+                
                 # Remove dead enemies
                 self.enemies = [e for e in self.enemies if e['health'] > 0]
                 
@@ -375,7 +490,7 @@ class Game:
                 for drop in self.item_drops[:]:
                     drop.update()
                     if drop.check_collection(self.player.x, self.player.y):
-                        if isinstance(drop.item, type(self.equipment.current_weapon)):
+                        if isinstance(drop.item, Weapon):
                             self.equipment.add_weapon(drop.item)
                         else:
                             self.equipment.add_armor(drop.item)
@@ -451,18 +566,48 @@ class Game:
     
     def draw(self):
         """Draw game elements"""
-        if self.state == "CHARACTER_SELECT":
+        if self.state == "MAIN_MENU":
+            self.draw_main_menu()
+        elif self.state == "CHARACTER_SELECT":
             self.draw_character_select()
         elif self.state == "AREA_SELECT":
             self.draw_area_select()
         elif self.state == "GAME":
             self.draw_game()
+        elif self.state == "SHOP":
+            self.draw_shop()
         elif self.state == "PAUSED":
             self.draw_paused()
         elif self.state == "GAME_OVER":
             self.draw_game_over()
         
         pygame.display.flip()
+    
+    def draw_main_menu(self):
+        """Draw main menu"""
+        self.screen.fill((20, 20, 40))
+        
+        font_large = pygame.font.Font(None, 100)
+        font_medium = pygame.font.Font(None, 48)
+        font_small = pygame.font.Font(None, 36)
+        
+        # Title
+        title = font_large.render("ACTION QUEST", True, (255, 200, 100))
+        self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 80))
+        
+        # Menu options
+        y_pos = 300
+        if self.save_manager.has_autosave():
+            continue_text = font_medium.render("1 - Continue (Load Autosave)", True, (100, 255, 100))
+            self.screen.blit(continue_text, (self.width // 2 - continue_text.get_width() // 2, y_pos))
+            y_pos += 80
+        
+        new_game = font_medium.render("2 - New Game", True, (100, 200, 255))
+        self.screen.blit(new_game, (self.width // 2 - new_game.get_width() // 2, y_pos))
+        y_pos += 80
+        
+        quit_text = font_medium.render("Q - Quit", True, (255, 100, 100))
+        self.screen.blit(quit_text, (self.width // 2 - quit_text.get_width() // 2, y_pos))
     
     def draw_character_select(self):
         """Draw character selection screen"""
@@ -521,6 +666,63 @@ class Game:
             
             back = font_small.render("Press ESC to go back", True, (150, 150, 150))
             self.screen.blit(back, (self.width // 2 - back.get_width() // 2, 600))
+    
+    def draw_shop(self):
+        """Draw shop interface"""
+        self.screen.fill((40, 40, 60))
+        
+        font_large = pygame.font.Font(None, 64)
+        font_medium = pygame.font.Font(None, 48)
+        font_small = pygame.font.Font(None, 32)
+        
+        if self.available_shops:
+            shop = self.available_shops[0]
+            
+            # Title
+            title = font_large.render(shop.name, True, (255, 200, 100))
+            self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 20))
+            
+            # Description
+            desc = font_small.render(shop.description, True, (200, 200, 200))
+            self.screen.blit(desc, (50, 100))
+            
+            # Discount info
+            discount = font_small.render(f"Discount: {shop.discount * 100:.0f}%", True, (100, 255, 100))
+            self.screen.blit(discount, (self.width - 300, 100))
+            
+            # Player gold
+            gold_text = font_medium.render(f"Gold: {self.equipment.gold}", True, (255, 215, 0))
+            self.screen.blit(gold_text, (50, 150))
+            
+            # Weapons section
+            weapons_label = font_medium.render("Weapons:", True, (255, 100, 100))
+            self.screen.blit(weapons_label, (50, 220))
+            
+            y_pos = 270
+            for i, weapon in enumerate(shop.weapons):
+                base_price = 100 if weapon[4] == 'common' else 120 if weapon[4] == 'uncommon' else 250
+                price = shop.get_discounted_price(base_price)
+                weapon_text = f"{i+1}. {weapon[0]} - DMG:{weapon[1]:.0f} - {price}g"
+                weapon_label = font_small.render(weapon_text, True, (200, 200, 200))
+                self.screen.blit(weapon_label, (70, y_pos))
+                y_pos += 40
+            
+            # Armor section
+            armor_label = font_medium.render("Armor:", True, (100, 150, 255))
+            self.screen.blit(armor_label, (self.width // 2 + 50, 220))
+            
+            y_pos = 270
+            for i, armor in enumerate(shop.armor):
+                base_price = 100 if armor[3] == 'common' else 120 if armor[3] == 'uncommon' else 250
+                price = shop.get_discounted_price(base_price)
+                armor_text = f"{i+1}. {armor[0]} - DEF:{armor[1]:.0f} - {price}g"
+                armor_label = font_small.render(armor_text, True, (200, 200, 200))
+                self.screen.blit(armor_label, (self.width // 2 + 70, y_pos))
+                y_pos += 40
+            
+            # Instructions
+            instr = font_small.render("Press ESC to return to game", True, (255, 255, 100))
+            self.screen.blit(instr, (self.width // 2 - instr.get_width() // 2, self.height - 50))
     
     def draw_game(self):
         """Draw the main game"""
@@ -631,12 +833,12 @@ class Game:
             controls = [
                 "W/A/S/D - Move | SPACE - Attack",
                 "SHIFT - Special | U - Upgrade Weapon",
-                "I - Upgrade Armor | Q - Change Area",
-                "ESC - Pause"
+                "I - Upgrade Armor | S - Shop",
+                "Q - Change Area | ESC - Pause"
             ]
             for i, control in enumerate(controls):
                 label = font_small.render(control, True, (150, 150, 150))
-                self.screen.blit(label, (self.width - 450, self.height - 110 + i * 25))
+                self.screen.blit(label, (self.width - 480, self.height - 110 + i * 25))
             
             # Notification
             if self.notification_timer > 0:
