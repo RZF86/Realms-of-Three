@@ -1,16 +1,19 @@
 """
-Entry point for the Action Game
+Entry point for the Action Game with shops and autosave
 """
 
 import pygame
 from game import Game
-
+from saves import SaveManager
 
 def main():
     """Initialize and run the game"""
     pygame.init()
     
-    game = Game()
+    # Initialize save manager
+    save_manager = SaveManager()
+    
+    game = Game(save_manager)
     game.run()
 
 
